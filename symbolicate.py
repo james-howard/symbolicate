@@ -90,11 +90,14 @@ for line in lines:
                     addrsByImage[image] = [addr]
 
 for (image, addresses) in addrsByImage.items():
-    symbols = image.symbolicate(addresses)
-    i = 0
-    for addr in addresses:
-        addrToSymbol[addr] = symbols[i]
-        i += 1
+    try:
+        symbols = image.symbolicate(addresses)
+        i = 0
+        for addr in addresses:
+            addrToSymbol[addr] = symbols[i]
+            i += 1
+    except:
+        sys.stderr.write("Cannot find symbols for %s\n" % image)
 
 for line in lines:
     match = btRE.match(line)
