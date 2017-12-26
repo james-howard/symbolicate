@@ -4,14 +4,15 @@ import fileinput
 import re
 import sys
 import subprocess
-import traceback
+import os.path
 import uuid as _uuid
 
 class BinaryImage:
-    def __init__(self, lowAddr, hiAddr, name, uuid, path, arch='x86_64'):
+    def __init__(self, lowAddr, hiAddr, identifier, uuid, path, arch='x86_64'):
         self.lowAddr = lowAddr
         self.hiAddr = hiAddr
-        self.name = name
+        self.identifier = identifier
+        self.name = os.path.basename(path)
         self.uuid = uuid
         self.path = path
         self.arch = arch if arch != "x86-64" else "x86_64" # sigh
@@ -41,12 +42,74 @@ class BinaryImage:
         
         for addr in addresses:
             args.append("0x%x" % addr)
-        
+
         result = subprocess.check_output(args)
         return result.split("\n")
     
     def __str__(self):
         return "0x%x - 0x%x %s <%s> %s %s" % (self.lowAddr, self.hiAddr, self.name, self.uuid, self.path, self.arch)
+
+
+class BacktraceLine:
+    @staticmethod
+    def match(line):
+        types = [CrashLine, SampleLine]
+        for type in types:
+            obj = type.match(line)
+            if obj:
+                return obj
+        return None
+
+    def __init__(self, line, addr):
+        self.original_line = line
+        self.addr = addr
+
+    def rewrite(self, symbol):
+        pass
+
+
+class CrashLine (BacktraceLine):
+    btRE = re.compile(r'(\d+\s*[\w\d\-\_\.]+\s*)(0x[0-9a-f]+)\s(.*)\n')
+
+    @staticmethod
+    def match(line):
+        if len(line) == 0:
+            return None
+        match = CrashLine.btRE.match(line)
+        return CrashLine(line, match) if match else None
+
+    def __init__(self, line, match):
+        BacktraceLine.__init__(self, line, int(match.group(2), 16))
+        self.match = match
+
+    def rewrite(self, symbol):
+        prefix = self.match.group(1)
+        addr = self.addr
+        suffix = self.match.group(3)
+        newLine = "%s0x%x %s\n" % (prefix, addr, symbol)
+        return newLine
+
+
+class SampleLine (BacktraceLine):
+    #     + !   :   |   + ! : |     + !   : | +   !   : | + 3 ???  (in Ship)  load address 0x1073ea000 + 0x65601  [0x10744f601]
+    sampleRE = re.compile(r'([\s+|:!]*)(\d+)\s*\?\?\?.*?\[0x([A-Fa-f0-9]+)\]')
+
+    @staticmethod
+    def match(line):
+        if len(line) == 0:
+            return None
+        match = SampleLine.sampleRE.match(line)
+        return SampleLine(line, match) if match else None
+
+    def __init__(self, line, match):
+        addr = int(match.group(3), 16)
+        BacktraceLine.__init__(self, line, addr)
+        self.prefix = match.group(1)
+        self.sample_count = match.group(2)
+
+    def rewrite(self, symbol):
+        return "%s%s %s\n" % (self.prefix, self.sample_count, symbol)
+
 
 lines = []
 for line in fileinput.input():
@@ -82,14 +145,14 @@ for line in lines[loc:]:
     if match:
         lowAddr = int(match.group(1), 16)
         hiAddr = int(match.group(2), 16)
-        nameParts = match.group(3).split(" ")
-        name = nameParts[0]
+        identifierParts = match.group(3).split(" ")
+        identifier = identifierParts[0]
         imgArch = arch
-        if len(nameParts) > 1 and not nameParts[1].startswith("("):
-            imgArch = nameParts[1]
+        if len(identifierParts) > 1 and not identifierParts[1].startswith("("):
+            imgArch = identifierParts[1]
         uuid = match.group(4)
         path = match.group(5)
-        image = BinaryImage(lowAddr, hiAddr, name, uuid, path, imgArch)
+        image = BinaryImage(lowAddr, hiAddr, identifier, uuid, path, imgArch)
 #        sys.stderr.write("Found image %s\n" % str(image))
         images.append(image)        
         
@@ -98,21 +161,16 @@ for line in lines[loc:]:
 addrsByImage = {}
 addrToSymbol = {}
 
-btRE = re.compile(r'(\d+\s*[\w\d\-\_\.]+\s*)(0x[0-9a-f]+)\s(.*)\n')
 for line in lines:
-    match = btRE.match(line)
+    match = BacktraceLine.match(line)
     if match:
-        prefix = match.group(1)
-        addr = int(match.group(2), 16)
-        suffix = match.group(3)
-        
         for image in images:
             symbolicated = None
-            if image.match(addr):
+            if image.match(match.addr):
                 if image in addrsByImage:
-                    addrsByImage[image].append(addr)
+                    addrsByImage[image].add(match.addr)
                 else:
-                    addrsByImage[image] = [addr]
+                    addrsByImage[image] = set([match.addr])
 
 for (image, addresses) in addrsByImage.items():
     try:
@@ -122,21 +180,15 @@ for (image, addresses) in addrsByImage.items():
             addrToSymbol[addr] = symbols[i]
             i += 1
     except:
-        sys.stderr.write("Cannot find symbols for %s\n" % image)
+        sys.stderr.write("Cannot find symbols for %s: %s\n" % (image, sys.exc_type))
 
 for line in lines:
-    match = btRE.match(line)
+    match = BacktraceLine.match(line)
     newLine = line
     if match:
-        prefix = match.group(1)
-        addr = int(match.group(2), 16)
-        suffix = match.group(3)
-        
-        if addr in addrToSymbol:
-            symbol = addrToSymbol[addr]
-            newLine = "%s0x%x %s\n" % (prefix, addr, symbol)
+        if match.addr in addrToSymbol:
+            symbol = addrToSymbol[match.addr]
+            newLine = match.rewrite(symbol)
 
     sys.stdout.write(newLine)
 
-                                
-    
