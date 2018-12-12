@@ -19,18 +19,40 @@ class BinaryImage:
     
     def match(self, addr):
         return self.lowAddr <= addr and self.hiAddr >= addr
-        
-    def symbolicate(self, addresses):
+
+    def findDsym(self):
         if not hasattr(self, 'dsymPath'):
-            findArgs = ['/usr/bin/mdfind', 'com_apple_xcode_dsym_uuids == %s' % (str(_uuid.UUID(self.uuid)).upper())]
+            self.dsymPath = None
+            upperUUID = str(_uuid.UUID(self.uuid)).upper()
+            findArgs = ['/usr/bin/mdfind', 'com_apple_xcode_dsym_uuids == %s' % upperUUID]
             try:
                 findResult = subprocess.check_output(findArgs).split('\n')
                 if len(findResult) >= 1 and len(findResult[0].strip()) > 0:
                     self.dsymPath = findResult[0] + "/Contents/Resources/DWARF/%s" % self.name
-                else:
-                    self.dsymPath = None
             except:
-                self.dsymPath = None
+                pass
+            if not self.dsymPath:
+                # Keep looking. Spotlight may not have indexed this dsym, but it's out there somewhere ...
+                findArgs = ['/usr/bin/mdfind', 'kMDItemFSName == %s.dSYM' % self.name]
+                try:
+                    findResults = subprocess.check_output(findArgs).split('\n')
+                    for path in findResults:
+                        filePath = path.strip() + "/Contents/Resources/DWARF/%s" % self.name
+                        if len(path) > 0 and os.path.exists(filePath):
+                            dwarfArgs = ['/usr/bin/dwarfdump', '-u', path]
+                            try:
+                                dwarfResults = subprocess.check_output(dwarfArgs).split('\n')
+                                for result in dwarfResults:
+                                    if result.startswith('UUID: %s' % upperUUID):
+                                        self.dsymPath = filePath
+                                        return
+                            except:
+                                pass
+                except:
+                    pass
+        
+    def symbolicate(self, addresses):
+        self.findDsym()
     
         path = self.dsymPath if self.dsymPath is not None else self.path
 
